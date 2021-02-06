@@ -4,6 +4,8 @@ import random
 import sys
 import time
 import traceback
+import math
+import string
 from collections import defaultdict
 from datetime import datetime
 
@@ -15,6 +17,7 @@ from discord.ext import commands, tasks
 
 from helpers import checks
 from . import mongo
+from captcha.image import ImageCaptcha
 
 MIN_SPAWN_THRESHOLD = 10
 
@@ -348,6 +351,50 @@ class Spawning(commands.Cog):
     async def catch(self, ctx, *, guess: str):
         """Catch a wild pokémon."""
 
+        # Human verification
+        if await self.bot.redis.hexists("locked", ctx.author.id) and int(await self.bot.redis.hget("locked", ctx.author.id)) == 1:
+            capcha, key = self.generate_capcha()
+            embed = self.bot.Embed(color=0x9CCFFF)
+            embed.title = "Pokétwo AntiCheat"
+            embed.description = "Unusual activity has been detected on your account. To continue catching, please type the word in the Capcha below."
+            print(capcha)
+            arr = await self.bot.loop.run_in_executor(
+                            None, write_fp, capcha.read()
+                        )
+            image = discord.File(arr, filename="capcha.jpg")
+            embed.set_image(url="attachment://capcha.jpg")
+            print(key)
+            await ctx.send(file=image,embed=embed)
+
+            def check(m):
+                return m.channel.id == ctx.channel.id and m.author.id == ctx.author.id
+
+            try:
+                msg = await self.bot.wait_for("message", timeout=10, check=check)
+
+                if msg.content.lower() != key.lower():
+                    return await ctx.send("Aborted.")
+                else:
+                    await self.bot.redis.hdel("locked", ctx.author.id)
+                    print(await self.bot.redis.hget("locked", ctx.author.id))
+                    await self.bot.redis.hset("streak", ctx.author.id, 0)
+                    return await ctx.send("Capcha verification passed. You may resume catching.")
+            except asyncio.TimeoutError:
+                return await ctx.send("Time's up. Aborted.")
+            
+        else:
+            if not await self.bot.redis.hexists("streak", ctx.author.id):
+                catch_streak = 0
+            else:
+                catch_streak = int(await self.bot.redis.hget("streak", ctx.author.id))
+
+            if self.determine_capcha(catch_streak):
+                await self.bot.redis.hset("locked", ctx.author.id, 1)
+                print(int( await self.bot.redis.hget("locked", ctx.author.id)))
+                print("Set redis lock")
+
+            await self.bot.redis.hset("streak", ctx.author.id, catch_streak + 1)
+
         # Retrieve correct species and level from tracker
 
         if not await self.bot.redis.hexists("wild", ctx.channel.id):
@@ -534,6 +581,17 @@ class Spawning(commands.Cog):
         self.spawn_incense.cancel()
         self.send_spawns.cancel()
 
+    def determine_capcha(self, catch_streak):
+        print(catch_streak)
+        print((1.0006**catch_streak-1))
+        active = random.random() < (1.0006**catch_streak-1)
+        print(active)
+        return active
+
+    def generate_capcha(self):
+        textkey = ''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(6))
+        image = ImageCaptcha(fonts=['./helpers/fonts/open-sans/OpenSans-Bold.ttf'])
+        return image.generate(textkey),textkey
 
 def setup(bot):
     bot.add_cog(Spawning(bot))
